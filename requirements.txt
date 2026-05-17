@@ -1,14 +1,21 @@
+# Core dependencies
 fastapi>=0.104.0
 uvicorn>=0.24.0
 httpx>=0.25.0
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+python-multipart>=0.0.6
+aiofiles>=23.2.1
+jinja2>=3.1.2
+
+# Graph and RAG
 networkx>=3.2
-matplotlib>=3.8.0
 faiss-cpu>=1.7.4
 sentence-transformers>=2.2.2
 numpy>=1.26.0
-python-dotenv>=1.0.0
-jinja2>=3.1.2
-python-multipart>=0.0.6
-aiofiles>=23.2.1
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+respx>=0.20.0

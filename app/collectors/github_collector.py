@@ -4,11 +4,14 @@ import base64
 import time
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Any
 
 import httpx
 
-from app.config import GITHUB_TOKEN, GITHUB_API, RAW_DIR
+from app.config import (
+    GITHUB_TOKEN, GITHUB_API, RAW_DIR,
+    MAX_REPOS, MAX_FILES_PER_REPO, MAX_FILE_BYTES, MAX_COMMITS_PER_REPO
+)
 
 
 class GitHubCollector:
@@ -26,13 +29,15 @@ class GitHubCollector:
     # ── User Profile ──────────────────────────────────────────────
 
     def get_user_profile(self) -> dict:
+        """Fetch GitHub user profile."""
         r = self.client.get(f"{GITHUB_API}/user")
         r.raise_for_status()
         return r.json()
 
     # ── Repository Listing (all pages) ────────────────────────────
 
-    def get_all_repos(self) -> list[dict]:
+    def get_all_repos(self) -> List[dict]:
+        """Get all repositories with pagination."""
         repos = []
         page = 1
         while True:
@@ -46,12 +51,13 @@ class GitHubCollector:
                 break
             repos.extend(batch)
             page += 1
-            time.sleep(0.3)
+            time.sleep(0.3)  # Rate limit friendly
         return repos
 
     # ── Language Bytes per Repo ───────────────────────────────────
 
     def get_repo_languages(self, owner: str, repo: str) -> dict:
+        """Get language breakdown by bytes."""
         r = self.client.get(f"{GITHUB_API}/repos/{owner}/{repo}/languages")
         if r.status_code == 200:
             return r.json()
@@ -59,7 +65,7 @@ class GitHubCollector:
 
     # ── File Tree ─────────────────────────────────────────────────
 
-    def get_repo_tree(self, owner: str, repo: str, branch: str = "main") -> list[dict]:
+    def get_repo_tree(self, owner: str, repo: str, branch: str = "main") -> List[dict]:
         """Get full file tree via Git Trees API (recursive)."""
         r = self.client.get(
             f"{GITHUB_API}/repos/{owner}/{repo}/git/trees/{branch}",
@@ -67,7 +73,7 @@ class GitHubCollector:
         )
         if r.status_code == 200:
             return r.json().get("tree", [])
-        # fallback to master
+        # Fallback to master branch
         r = self.client.get(
             f"{GITHUB_API}/repos/{owner}/{repo}/git/trees/master",
             params={"recursive": "1"},
@@ -79,6 +85,7 @@ class GitHubCollector:
     # ── Read Single File Content ──────────────────────────────────
 
     def get_file_content(self, owner: str, repo: str, path: str, branch: str = "main") -> Optional[str]:
+        """Get content of a single file."""
         r = self.client.get(
             f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}",
             params={"ref": branch},
@@ -86,18 +93,21 @@ class GitHubCollector:
         if r.status_code == 200:
             data = r.json()
             if data.get("encoding") == "base64" and data.get("content"):
-                return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+                content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+                # Truncate if too large
+                if len(content) > MAX_FILE_BYTES:
+                    return content[:MAX_FILE_BYTES] + "\n\n... [truncated]"
+                return content
         return None
 
     # ── README ────────────────────────────────────────────────────
 
     def get_readme(self, owner: str, repo: str) -> str:
-        content = self.get_file_content(owner, repo, "README.md")
-        if content:
-            return content
-        content = self.get_file_content(owner, repo, "readme.md")
-        if content:
-            return content
+        """Get README content."""
+        for readme_path in ["README.md", "readme.md", "README.MD"]:
+            content = self.get_file_content(owner, repo, readme_path)
+            if content:
+                return content
         return ""
 
     # ── Dependency Files ──────────────────────────────────────────
@@ -139,9 +149,10 @@ class GitHubCollector:
         "drizzle.config.ts",
         ".env.example",
         "CLAUDE.md", "AGENTS.md",
+        "README.md", "CONTRIBUTING.md", "LICENSE",
     ]
 
-    def get_dependency_files(self, owner: str, repo: str, branch: str = "main") -> dict:
+    def get_dependency_files(self, owner: str, repo: str, branch: str = "main") -> Dict[str, str]:
         """Extract content of all dependency & config files."""
         results = {}
         all_files = self.DEPENDENCY_FILES + self.CONFIG_FILES
@@ -149,32 +160,36 @@ class GitHubCollector:
             content = self.get_file_content(owner, repo, fname, branch)
             if content:
                 results[fname] = content
-            time.sleep(0.05)
+            time.sleep(0.05)  # Rate limit friendly
         return results
 
     # ── Key Source Files Detection ────────────────────────────────
 
     KEY_FILE_PATTERNS = [
-        r"^src/app/.*\.tsx?$",          # Next.js App Router pages
-        r"^src/pages/.*\.tsx?$",        # Next.js Pages Router
-        r"^src/components/.*\.tsx?$",   # React components
-        r"^src/lib/.*\.ts$",            # Utility libraries
-        r"^src/server/.*\.ts$",         # Server code
-        r"^src/api/.*\.ts$",            # API routes
-        r"^app/.*\.py$",                # Python app
-        r"^api/.*\.py$",                # Python API
-        r"^src/.*\.py$",                # Python source
-        r"^main\.py$",                  # Python entry
-        r"^index\.ts$",                 # TS entry
-        r"^index\.js$",                 # JS entry
-        r"^server\.py$",                # Python server
-        r"^server\.ts$",                # TS server
-        r"^worker\.ts$",                # Cloudflare Worker
-        r"^worker\.js$",                # CF Worker JS
+        r"^src/app/.*\.tsx?$",  # Next.js App Router pages
+        r"^src/pages/.*\.tsx?$",  # Next.js Pages Router
+        r"^src/components/.*\.tsx?$",  # React components
+        r"^src/lib/.*\.ts$",  # Utility libraries
+        r"^src/server/.*\.ts$",  # Server code
+        r"^src/api/.*\.ts$",  # API routes
+        r"^app/.*\.py$",  # Python app
+        r"^api/.*\.py$",  # Python API
+        r"^src/.*\.py$",  # Python source
+        r"^main\.py$",  # Python entry
+        r"^index\.ts$",  # TS entry
+        r"^index\.js$",  # JS entry
+        r"^server\.py$",  # Python server
+        r"^server\.ts$",  # TS server
+        r"^worker\.ts$",  # Cloudflare Worker
+        r"^worker\.js$",  # CF Worker JS
+        r"^pages/.*\.tsx?$",  # Next.js pages
+        r"^components/.*\.tsx?$",  # React components root
     ]
 
-    def detect_key_source_files(self, tree: list[dict], max_files: int = 15) -> list[str]:
+    def detect_key_source_files(self, tree: List[dict], max_files: int = None) -> List[str]:
         """Find key source files from the repo tree."""
+        if max_files is None:
+            max_files = MAX_FILES_PER_REPO
         key_files = []
         for entry in tree:
             path = entry.get("path", "")
@@ -188,20 +203,26 @@ class GitHubCollector:
                 break
         return key_files
 
-    def get_key_source_contents(self, owner: str, repo: str, key_files: list[str], branch: str = "main") -> dict:
-        """Read content of key source files (limited to first 500 lines each)."""
+    def get_key_source_contents(
+        self, owner: str, repo: str, key_files: List[str], branch: str = "main"
+    ) -> Dict[str, str]:
+        """Read content of key source files (limited lines each)."""
         results = {}
-        for path in key_files[:15]:
+        for path in key_files[:MAX_FILES_PER_REPO]:
             content = self.get_file_content(owner, repo, path, branch)
             if content:
                 lines = content.split("\n")
+                # Limit to first 500 lines per file
                 results[path] = "\n".join(lines[:500])
-            time.sleep(0.05)
+            time.sleep(0.05)  # Rate limit friendly
         return results
 
     # ── Commit Activity ───────────────────────────────────────────
 
-    def get_repo_commits(self, owner: str, repo: str, per_page: int = 30) -> list[dict]:
+    def get_repo_commits(self, owner: str, repo: str, per_page: int = None) -> List[dict]:
+        """Get recent commits."""
+        if per_page is None:
+            per_page = MAX_COMMITS_PER_REPO
         r = self.client.get(
             f"{GITHUB_API}/repos/{owner}/{repo}/commits",
             params={"per_page": per_page},
@@ -218,7 +239,7 @@ class GitHubCollector:
         name = repo["name"]
         default_branch = repo.get("default_branch", "main")
 
-        print(f"  🔍 Deep analyzing: {owner}/{name} ...")
+        print(f" 🔍 Deep analyzing: {owner}/{name} ...")
 
         # Language breakdown
         languages = self.get_repo_languages(owner, name)
@@ -238,7 +259,7 @@ class GitHubCollector:
         key_file_contents = self.get_key_source_contents(owner, name, key_file_paths, default_branch)
 
         # Recent commits
-        commits = self.get_repo_commits(owner, name, 10)
+        commits = self.get_repo_commits(owner, name)
 
         analysis = {
             "repo_name": name,
@@ -259,7 +280,7 @@ class GitHubCollector:
             "pushed_at": repo.get("pushed_at", ""),
             "topics": repo.get("topics", []),
             "file_count": len(file_paths),
-            "file_paths": file_paths[:200],  # cap for storage
+            "file_paths": file_paths[:200],  # Cap for storage
             "directory_structure": self._extract_dirs(tree),
             "readme": readme[:3000],
             "dependency_files": dep_files,
@@ -274,11 +295,11 @@ class GitHubCollector:
             ],
         }
 
-        time.sleep(0.5)
+        time.sleep(0.5)  # Rate limit friendly
         return analysis
 
-    def _extract_dirs(self, tree: list[dict]) -> list[str]:
-        """Extract unique directory paths."""
+    def _extract_dirs(self, tree: List[dict]) -> List[str]:
+        """Extract unique directory paths from tree."""
         dirs = set()
         for entry in tree:
             path = entry.get("path", "")
@@ -289,7 +310,7 @@ class GitHubCollector:
 
     # ── Full Collection Pipeline ──────────────────────────────────
 
-    def collect_all(self, max_repos: int = 0) -> dict:
+    def collect_all(self, max_repos: int = None) -> dict:
         """Run full collection: profile + all repos with deep analysis."""
         print("👤 Fetching GitHub profile...")
         profile = self.get_user_profile()
@@ -297,26 +318,28 @@ class GitHubCollector:
 
         print("📂 Fetching repository list...")
         repos = self.get_all_repos()
-        print(f"   Found {len(repos)} repositories")
+        print(f" Found {len(repos)} repositories")
 
         # Filter out forks for skill analysis (original work only)
         original_repos = [r for r in repos if not r.get("fork", False)]
         fork_repos = [r for r in repos if r.get("fork", False)]
-        print(f"   Original: {len(original_repos)}, Forks: {len(fork_repos)}")
+        print(f" Original: {len(original_repos)}, Forks: {len(fork_repos)}")
 
         repos_to_analyze = original_repos
+        if max_repos is None:
+            max_repos = MAX_REPOS
         if max_repos > 0:
             repos_to_analyze = original_repos[:max_repos]
 
         print(f"🔧 Deep analyzing {len(repos_to_analyze)} repos...")
         deep_analyses = []
         for i, repo in enumerate(repos_to_analyze):
-            print(f"  [{i+1}/{len(repos_to_analyze)}]", end="")
+            print(f" [{i+1}/{len(repos_to_analyze)}]", end="")
             try:
                 analysis = self.analyze_repo_deep(repo)
                 deep_analyses.append(analysis)
             except Exception as e:
-                print(f"  ⚠️ Error analyzing {repo['name']}: {e}")
+                print(f" ⚠️ Error analyzing {repo['name']}: {e}")
 
         # Save fork repo names (lightweight)
         fork_summary = [{"name": r["name"], "url": r["html_url"], "fork": True} for r in fork_repos]
@@ -335,6 +358,7 @@ class GitHubCollector:
         return result
 
     def _save_json(self, name: str, data: dict):
+        """Save JSON data to cache directory."""
         path = self.cache_dir / f"{name}.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2, default=str)
