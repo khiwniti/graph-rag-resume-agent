@@ -1,0 +1,23 @@
+{
+  "builds": [
+    {
+      "src": "requirements.txt",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app/main.py"
+    }
+  ],
+  "outputDirectory": "data",
+  "env": {
+    "PYTHON_VERSION": "3.12"
+  },
+  "functions": {
+    "app/main.py": {
+      "maxDuration": 60
+    }
+  }
+}
