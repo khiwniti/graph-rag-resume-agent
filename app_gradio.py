@@ -7,137 +7,265 @@ and viewing skills, projects, and system health.
 
 Run with: python app_gradio.py
 Or deploy to Hugging Face Spaces (auto-launches via Dockerfile)
+
+The app uses direct imports from the knowledge graph - NO external API needed!
+The knowledge graph is static data loaded from local files.
 """
 
 import os
-import json
-import httpx
+import sys
 import gradio as gr
 
-# API URL - defaults to local, can be configured via environment
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+# Add app directory to path for direct imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Try direct import first (no API needed), fall back to HTTP
+try:
+    from app.graph.query import GraphQuerier
+    from app.agent.resume_agent import ResumeAgent
+    DIRECT_MODE = True
+    print("✓ Using direct mode - loading knowledge graph from local files")
+except ImportError as e:
+    # Fall back to HTTP mode
+    import httpx
+    DIRECT_MODE = False
+    API_URL = os.getenv("API_URL", "http://localhost:8000")
+    print(f"ℹ Using HTTP mode - connecting to {API_URL}")
 
 
 def check_health():
-    """Check the health status of the API."""
-    try:
-        response = httpx.get(f"{API_URL}/health", timeout=10)
-        data = response.json()
-        graph_status = "✅ Loaded" if data.get("graph_loaded") else "❌ Not Loaded"
-        vector_status = "✅ Loaded" if data.get("vector_store_loaded") else "❌ Not Loaded"
+    """Check the health status - direct mode loads from local files."""
+    if DIRECT_MODE:
+        # Direct mode - check local files
+        import os
+        graph_path = "data/graph/knowledge_graph.json"
+        vector_path = "data/embeddings/faiss_index.faiss"
+        graph_loaded = os.path.exists(graph_path)
+        vector_loaded = os.path.exists(vector_path)
+        graph_status = "✅ Loaded" if graph_loaded else "❌ Not Loaded"
+        vector_status = "✅ Loaded" if vector_loaded else "❌ Not Loaded"
         return f"""
         ### System Health
 
         | Component | Status |
         |-----------|--------|
-        | Overall | ✅ {data.get('status', 'unknown')} |
+        | Overall | ✅ Running |
         | Knowledge Graph | {graph_status} |
         | Vector Store | {vector_status} |
         """
-    except Exception as e:
-        return f"### System Health\n\n❌ Error: {str(e)}"
+    else:
+        # HTTP mode
+        try:
+            response = httpx.get(f"{API_URL}/health", timeout=10)
+            data = response.json()
+            graph_status = "✅ Loaded" if data.get("graph_loaded") else "❌ Not Loaded"
+            vector_status = "✅ Loaded" if data.get("vector_store_loaded") else "❌ Not Loaded"
+            return f"""
+            ### System Health
+
+            | Component | Status |
+            |-----------|--------|
+            | Overall | ✅ {data.get('status', 'unknown')} |
+            | Knowledge Graph | {graph_status} |
+            | Vector Store | {vector_status} |
+            """
+        except Exception as e:
+            return f"### System Health\n\n❌ Error: {str(e)}"
 
 
 def list_skills(min_confidence=0.3):
-    """List all skills from the API."""
-    try:
-        response = httpx.get(f"{API_URL}/skills?min_confidence={min_confidence}", timeout=10)
-        data = response.json()
-        skills = data.get("skills", [])
-        total = data.get("total", 0)
+    """List all skills - direct mode loads from local knowledge graph."""
+    if DIRECT_MODE:
+        try:
+            querier = GraphQuerier()
+            all_skills = querier.get_skills()
+            # Filter by confidence
+            skills = [s for s in all_skills if s.get("confidence", 0) >= min_confidence]
+            skills.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+            total = len(skills)
 
-        if not skills:
-            return f"No skills found with confidence >= {min_confidence}"
+            if not skills:
+                return f"No skills found with confidence >= {min_confidence}"
 
-        # Create markdown table
-        md = f"### Skills ({total} total, confidence ≥ {min_confidence})\n\n"
-        md += "| Skill | Category | Confidence | Mentions |\n"
-        md += "|-------|----------|------------|----------|\n"
+            # Create markdown table
+            md = f"### Skills ({total} total, confidence ≥ {min_confidence})\n\n"
+            md += "| Skill | Category | Confidence | Mentions |\n"
+            md += "|-------|----------|------------|----------|\n"
 
-        for skill in skills:
-            name = skill.get("skill", "Unknown")
-            confidence = skill.get("confidence", 0)
-            category = skill.get("category", "general")
-            evidence_count = skill.get("evidence_count", 0)
-            md += f"| {name} | {category} | {confidence:.2f} | {evidence_count} |\n"
+            for skill in skills:
+                name = skill.get("name", "Unknown")
+                confidence = skill.get("confidence", 0)
+                category = skill.get("category", "general")
+                mention_count = skill.get("mention_count", 0)
+                md += f"| {name} | {category} | {confidence:.2f} | {mention_count} |\n"
 
-        return md
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+            return md
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
+    else:
+        # HTTP mode
+        try:
+            response = httpx.get(f"{API_URL}/skills?min_confidence={min_confidence}", timeout=10)
+            data = response.json()
+            skills = data.get("skills", [])
+            total = data.get("total", 0)
+
+            if not skills:
+                return f"No skills found with confidence >= {min_confidence}"
+
+            # Create markdown table
+            md = f"### Skills ({total} total, confidence ≥ {min_confidence})\n\n"
+            md += "| Skill | Category | Confidence | Mentions |\n"
+            md += "|-------|----------|------------|----------|\n"
+
+            for skill in skills:
+                name = skill.get("skill", "Unknown")
+                confidence = skill.get("confidence", 0)
+                category = skill.get("category", "general")
+                evidence_count = skill.get("evidence_count", 0)
+                md += f"| {name} | {category} | {confidence:.2f} | {evidence_count} |\n"
+
+            return md
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
 
 
 def list_projects():
-    """List all projects from the API."""
-    try:
-        response = httpx.get(f"{API_URL}/projects", timeout=10)
-        data = response.json()
-        projects = data.get("projects", [])
-        total = data.get("total", 0)
+    """List all projects - direct mode loads from local knowledge graph."""
+    if DIRECT_MODE:
+        try:
+            querier = GraphQuerier()
+            projects = querier.get_projects()
+            total = len(projects)
 
-        if not projects:
-            return "No projects found"
+            if not projects:
+                return "No projects found"
 
-        # Create markdown table
-        md = f"### Projects ({total} total)\n\n"
-        md += "| Name | Platform | URL |\n"
-        md += "|------|----------|-----|\n"
+            # Create markdown table
+            md = f"### Projects ({total} total)\n\n"
+            md += "| Name | Platform | URL |\n"
+            md += "|------|----------|-----|\n"
 
-        for project in projects[:50]:  # Limit to 50 for display
-            name = project.get("name", "Unknown")
-            platform = project.get("platform", "unknown")
-            url = project.get("url", "")
-            url_display = url[:50] + "..." if len(url) > 50 else url
-            md += f"| {name} | {platform} | [{url_display}]({url}) |\n"
+            for project in projects[:50]:  # Limit to 50 for display
+                name = project.get("name", "Unknown")
+                platform = project.get("platform", "unknown")
+                url = project.get("url", "")
+                url_display = url[:50] + "..." if len(url) > 50 else url
+                md += f"| {name} | {platform} | [{url_display}]({url}) |\n"
 
-        if total > 50:
-            md += f"\n*Showing first 50 of {total} projects*"
+            if total > 50:
+                md += f"\n*Showing first 50 of {total} projects*"
 
-        return md
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+            return md
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
+    else:
+        # HTTP mode
+        try:
+            response = httpx.get(f"{API_URL}/projects", timeout=10)
+            data = response.json()
+            projects = data.get("projects", [])
+            total = data.get("total", 0)
+
+            if not projects:
+                return "No projects found"
+
+            # Create markdown table
+            md = f"### Projects ({total} total)\n\n"
+            md += "| Name | Platform | URL |\n"
+            md += "|------|----------|-----|\n"
+
+            for project in projects[:50]:  # Limit to 50 for display
+                name = project.get("name", "Unknown")
+                platform = project.get("platform", "unknown")
+                url = project.get("url", "")
+                url_display = url[:50] + "..." if len(url) > 50 else url
+                md += f"| {name} | {platform} | [{url_display}]({url}) |\n"
+
+            if total > 50:
+                md += f"\n*Showing first 50 of {total} projects*"
+
+            return md
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
 
 
 def query_agent(question, top_k=5):
-    """Query the resume agent with a question."""
+    """Query the resume agent - direct mode uses local ResumeAgent."""
     if not question or not question.strip():
         return "Please enter a question."
 
-    try:
-        response = httpx.post(
-            f"{API_URL}/query",
-            json={"question": question, "top_k": top_k},
-            timeout=60
-        )
-        data = response.json()
+    if DIRECT_MODE:
+        try:
+            agent = ResumeAgent()
+            response = agent.query(question=question, top_k=top_k)
 
-        # Format the response
-        answer = data.get("answer", "No answer provided")
-        confidence = data.get("confidence", 0)
-        skills = data.get("skills", [])
-        sources = data.get("sources", [])
+            # Format the response
+            answer = response.answer
+            confidence = response.confidence
+            skills = response.skills
+            sources = response.sources
 
-        # Build response
-        md = f"### Answer\n\n{answer}\n\n"
-        md += f"**Confidence:** {confidence:.2f}\n\n"
+            # Build response
+            md = f"### Answer\n\n{answer}\n\n"
+            md += f"**Confidence:** {confidence:.2f}\n\n"
 
-        # Skills found
-        if skills:
-            md += "### Skills Found\n\n"
-            for skill in skills[:5]:
-                skill_name = skill.get("name", "Unknown")
-                skill_conf = skill.get("confidence", 0)
-                md += f"- {skill_name} (confidence: {skill_conf:.2f})\n"
-            md += "\n"
+            # Skills found
+            if skills:
+                md += "### Skills Found\n\n"
+                for skill in skills[:5]:
+                    skill_name = skill.get("name", "Unknown")
+                    skill_conf = skill.get("confidence", 0)
+                    md += f"- {skill_name} (confidence: {skill_conf:.2f})\n"
+                md += "\n"
 
-        # Sources
-        if sources:
-            md += "### Sources\n\n"
-            for source in sources[:5]:
-                md += f"- {source}\n"
+            # Sources
+            if sources:
+                md += "### Sources\n\n"
+                for source in sources[:5]:
+                    md += f"- {source}\n"
 
-        return md
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+            return md
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
+    else:
+        # HTTP mode
+        try:
+            response = httpx.post(
+                f"{API_URL}/query",
+                json={"question": question, "top_k": top_k},
+                timeout=60
+            )
+            data = response.json()
+
+            # Format the response
+            answer = data.get("answer", "No answer provided")
+            confidence = data.get("confidence", 0)
+            skills = data.get("skills", [])
+            sources = data.get("sources", [])
+
+            # Build response
+            md = f"### Answer\n\n{answer}\n\n"
+            md += f"**Confidence:** {confidence:.2f}\n\n"
+
+            # Skills found
+            if skills:
+                md += "### Skills Found\n\n"
+                for skill in skills[:5]:
+                    skill_name = skill.get("name", "Unknown")
+                    skill_conf = skill.get("confidence", 0)
+                    md += f"- {skill_name} (confidence: {skill_conf:.2f})\n"
+                md += "\n"
+
+            # Sources
+            if sources:
+                md += "### Sources\n\n"
+                for source in sources[:5]:
+                    md += f"- {source}\n"
+
+            return md
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
 
 
 def create_demo():

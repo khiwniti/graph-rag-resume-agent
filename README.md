@@ -5,7 +5,7 @@ colorFrom: blue
 colorTo: indigo
 sdk: docker
 pinned: false
-license: MIT
+license: mit
 ---
 
 # Graph RAG Resume Agent
