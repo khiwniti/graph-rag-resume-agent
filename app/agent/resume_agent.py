@@ -69,7 +69,7 @@ class ResumeAgent:
     @property
     def graph_querier(self) -> GraphQuerier:
         if self._graph_querier is None:
-            self._graph_querier = GraphQuerier(self.graph_builder.graph)
+            self._graph_querier = GraphQuerier(self.graph_path)
         return self._graph_querier
     
     @property
@@ -100,37 +100,52 @@ class ResumeAgent:
     def query(self, question: str, top_k: int = 5) -> AgentResponse:
         """
         Query the résumé agent with a question.
-        
+
         Args:
             question: User's question (e.g., "What are my Python skills?")
             top_k: Number of top results to retrieve
-            
+
         Returns:
             AgentResponse with answer, skills, evidence, and sources
         """
         # Retrieve relevant information
         retrieved = self.retriever.retrieve(question, k=top_k)
-        
+
+        # retrieved is a list of dicts with keys: type, text, metadata, source, score
+        # Convert to chunks format for downstream methods
+        chunks = []
+        sources = []
+        for item in retrieved:
+            chunk = {
+                "text": item.get("text", ""),
+                "source": item.get("source", "unknown"),
+                "metadata": item.get("metadata", {}),
+                "score": item.get("score", 0.0)
+            }
+            chunks.append(chunk)
+            if item.get("source"):
+                sources.append(item["source"])
+
         # Extract skills from retrieved chunks
-        skills = self._extract_skills_from_chunks(retrieved.chunks)
-        
+        skills = self._extract_skills_from_chunks(chunks)
+
         # Get graph-based evidence
         graph_evidence = self._get_graph_evidence(question)
-        
+
         # Combine and rank evidence
-        all_evidence = self._rank_evidence(retrieved.chunks, graph_evidence)
-        
+        all_evidence = self._rank_evidence(chunks, graph_evidence)
+
         # Generate answer
-        answer = self._generate_answer(question, skills, all_evidence, retrieved.sources)
-        
+        answer = self._generate_answer(question, skills, all_evidence, sources)
+
         # Calculate overall confidence
         confidence = self._calculate_confidence(skills, all_evidence)
-        
+
         return AgentResponse(
             answer=answer,
             skills=skills,
             evidence=all_evidence,
-            sources=list(set(retrieved.sources)),
+            sources=list(set(sources)),
             confidence=confidence
         )
     
@@ -148,7 +163,8 @@ class ResumeAgent:
         skill_nodes = self.graph_querier.get_skills()
         
         skills = []
-        for skill_name, skill_data in skill_nodes.items():
+        for skill_data in skill_nodes:
+            skill_name = skill_data.get("name", "")
             confidence = skill_data.get("confidence", 0.0)
             if confidence >= min_confidence:
                 skills.append({

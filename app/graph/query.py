@@ -106,14 +106,34 @@ class GraphQuerier:
         return connected
 
     def get_skills(self) -> List[Dict[str, Any]]:
-        """
-        Get all skills from the graph.
-        
-        Returns:
-            List of skill data
-        """
+        """Get all skills from graph (from skill nodes)."""
         self._load_graph()
-        return self._cache.get("skills", [])
+        skills = []
+        for node in self._cache.get("nodes", []):
+            if node.get("type") == "skill":
+                props = node.get("properties", {})
+                mention_count = props.get("mention_count", 0)
+                skills.append({
+                    "name": props.get("name", node.get("id", "")),
+                    "category": props.get("category", "general"),
+                    "confidence": min(mention_count / 100.0, 1.0) if mention_count else 0.5,
+                    "mention_count": mention_count,
+                })
+        return skills
+
+    def get_projects(self) -> List[Dict[str, Any]]:
+        """Get all projects from the graph."""
+        self._load_graph()
+        projects = []
+        for node in self._cache.get("nodes", []):
+            if node.get("type") == "project":
+                props = node.get("properties", {})
+                projects.append({
+                    "name": props.get("name", node.get("id", "")),
+                    "platform": props.get("platform", "unknown"),
+                    "url": props.get("url", ""),
+                })
+        return projects
 
     def get_top_skills(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
@@ -132,6 +152,49 @@ class GraphQuerier:
             reverse=True
         )
         return sorted_skills[:limit]
+
+    def get_skill_evidence(self, skill_name: str) -> List[Dict[str, Any]]:
+        """
+        Get evidence for a specific skill.
+
+        Args:
+            skill_name: Name of the skill
+
+        Returns:
+            List of evidence items for the skill
+        """
+        self._load_graph()
+        skill_lower = skill_name.lower()
+        evidence = []
+
+        # Search for skill node
+        for node in self._cache.get("nodes", []):
+            if node.get("type") == "skill":
+                props = node.get("properties", {})
+                name = props.get("name", "").lower()
+                if name == skill_lower or skill_lower in name:
+                    evidence.append({
+                        "type": "skill_node",
+                        "text": f"Skill: {props.get('name', '')}",
+                        "source": node.get("id", ""),
+                        "confidence": min(props.get("mention_count", 0) / 100.0, 1.0) if props.get("mention_count") else 0.5,
+                    })
+
+        # Search edges for USES relationships involving this skill
+        for edge in self._cache.get("edges", []):
+            if edge.get("type") == "USES":
+                target = edge.get("target", "")
+                if skill_lower in target.lower():
+                    source_node = self._nodes_by_id.get(edge.get("source", ""))
+                    if source_node:
+                        evidence.append({
+                            "type": "edge",
+                            "text": f"Used by: {source_node.get('properties', {}).get('name', source_node.get('id', ''))}",
+                            "source": source_node.get("id", ""),
+                            "confidence": 0.6,
+                        })
+
+        return evidence
 
     def search_skills(
         self,
@@ -219,6 +282,20 @@ class GraphQuerier:
                     skills.append(skill_node)
         
         return skills
+
+    def get_projects(self) -> List[Dict[str, Any]]:
+        """Get all projects from the graph."""
+        self._load_graph()
+        projects = []
+        for node in self._cache.get("nodes", []):
+            if node.get("type") == "project":
+                props = node.get("properties", {})
+                projects.append({
+                    "name": props.get("name", node.get("id", "")),
+                    "platform": props.get("platform", "unknown"),
+                    "url": props.get("url", ""),
+                })
+        return projects
 
     def get_stats(self) -> Dict[str, Any]:
         """

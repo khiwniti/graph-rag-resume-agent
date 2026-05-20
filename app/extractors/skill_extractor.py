@@ -83,6 +83,32 @@ class SkillExtractor:
     def __init__(self):
         self.skill_evidence = defaultdict(list)  # skill_name -> list of evidence
 
+    def extract_from_text(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Extract skills from plain text.
+
+        Args:
+            text: Text to extract skills from
+
+        Returns:
+            List of skill dicts with name, confidence, and evidence
+        """
+        skills = []
+        text_lower = text.lower()
+
+        for skill_name, category in self.SKILL_CATEGORIES.items():
+            if skill_name in text_lower:
+                # Found skill mention
+                skill_data = {
+                    "name": skill_name,
+                    "category": category,
+                    "confidence": 0.5,  # Base confidence for text mention
+                    "evidence": [text[:200]]  # Truncated text as evidence
+                }
+                skills.append(skill_data)
+
+        return skills
+
     def extract_from_dependencies(
         self,
         dependencies: List[Dict[str, Any]],

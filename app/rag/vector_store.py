@@ -120,7 +120,7 @@ class VectorStore:
         # Convert to results
         results = []
         for i, idx in enumerate(indices[0]):
-            if idx < len(self.metadata_store):
+            if 0 <= idx < len(self.metadata_store):
                 results.append((
                     self.metadata_store[idx],
                     float(scores[0][i])
