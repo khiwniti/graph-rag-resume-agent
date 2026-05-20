@@ -19,17 +19,14 @@ COPY . .
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV HF_HOME=/tmp/huggingface
-# API runs on localhost:8000, Gradio connects internally
-ENV API_URL=http://localhost:8000
 
-# Expose ports (FastAPI: 8000, Gradio: 7860)
-EXPOSE 8000 7860
+# Expose Gradio port
+EXPOSE 7860
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:7860')" || exit 1
 
-# Run both FastAPI (background) and Gradio (foreground)
-# FastAPI serves the knowledge graph queries
-# Gradio provides the UI
-CMD sh -c "python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 & python app_gradio.py"
+# Run Gradio UI only
+# Direct mode: loads knowledge graph from local files (no separate API server needed)
+CMD ["python", "app_gradio.py"]
