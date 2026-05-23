@@ -1,11 +1,18 @@
 """Configuration management for Graph RAG Resume Agent."""
 import os
+import logging
 from pathlib import Path
-from dotenv import load_dotenv
 
-# override=True so .env takes precedence over shell env vars
-# (e.g. cloud Neo4j Aura credentials override local Docker defaults)
-load_dotenv(override=True)
+_log = logging.getLogger(__name__)
+
+try:
+    from dotenv import load_dotenv
+    # override=True so .env takes precedence over shell env vars
+    # (e.g. cloud Neo4j Aura credentials override local Docker defaults)
+    load_dotenv(override=True)
+except ImportError:
+    _log.debug("python-dotenv not installed; using shell env vars only")
+    load_dotenv = None  # type: ignore
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / os.getenv("DATA_DIR", "data")
