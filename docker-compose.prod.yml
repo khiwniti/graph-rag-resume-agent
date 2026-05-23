@@ -1,0 +1,78 @@
+# -*- coding: utf-8 -*-
+# Production Docker Compose - minimal setup for deployment
+
+version: '3.8'
+
+services:
+  neo4j:
+    image: neo4j:5.16-enterprise
+    container_name: graph-rag-neo4j
+    restart: always
+    ports:
+      - \"127.0.0.1:7474:7474\"  # Bind to localhost only in production
+      - \"127.0.0.1:7687:7687\"
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD}
+      NEO4J_dbms_memory_heap_initial__size: 1G
+      NEO4J_dbms_memory_heap_max__size: 4G
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: [\"CMD\", \"cypher-shell\", \"-u\", \"neo4j\", \"-p\", \"${NEO4J_PASSWORD}\", \"RETURN 1\"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - graph-rag-network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: application
+    container_name: graph-rag-api
+    restart: always
+    ports:
+      - \"8000:8000\"
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_DATABASE: neo4j
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: json
+      RATE_LIMIT_ENABLED: \"true\"
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-60}
+      API_KEYS: ${API_KEYS}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      SECRET_KEY: ${SECRET_KEY}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      VERCEL_TOKEN: ${VERCEL_TOKEN}
+      CLOUDFLARE_TOKEN: ${CLOUDFLARE_TOKEN}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}
+    volumes:
+      - api_data:/app/data
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:8000/health/live\"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - graph-rag-network
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  api_data:
+
+networks:
+  graph-rag-network:
+    driver: bridge

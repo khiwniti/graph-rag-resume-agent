@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip list *)",
+      "Bash(python *)",
+      "Bash(npx vercel *)",
+      "Bash(timeout 30 cat /tmp/claude-1000/-teamspace-studios-this-studio-graph-rag-resume-agent/f8fd21f7-1bdb-460d-839b-78e688751ceb/tasks/b2senwvb9.output)",
+      "Bash(chmod +x *)",
+      "Bash(systemctl status *)",
+      "Bash(grep -v \"^$\")",
+      "Bash(docker --version)",
+      "Bash(docker network *)",
+      "Bash(docker run *)",
+      "Bash(python3 *)"
+    ]
+  }
+}
