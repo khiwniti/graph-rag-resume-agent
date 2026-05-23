@@ -36,6 +36,11 @@ from app.collectors.github_collector import GitHubCollector
 from app.collectors.vercel_collector import VercelCollector
 from app.collectors.cloudflare_collector import CloudflareCollector
 from app.cleaner import DataCleaner, CleanedProject
+from app.extractors.code_structure import CodeStructureExtractor, entity_id as code_entity_id
+from app.extractors.cross_file_linker import CrossFileLinker, file_id as cross_file_id
+from app.extractors.architecture_detector import ArchitectureDetector
+from app.extractors.deployment_analyzer import DeploymentAnalyzer, DeploymentAnalysis, config_id, route_id
+from app.extractors.doc_code_linker import DocCodeLinker, narrative_id_from_section
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -112,6 +117,233 @@ class EnhancedPipeline:
         except Exception as e:
             logger.warning(f'Failed to cleanup {repo_path}: {e}')
             return False
+
+    def _ingest_deep_analysis(self, cleaned: CleanedProject, repo_path: str,
+                               readme_content: str = "") -> int:
+        """Ingest deep code structure, cross-file links, architecture, and doc-code
+        links into Neo4j. Returns count of new nodes created."""
+        count = 0
+        project_id = cleaned.project_id
+
+        # --- 1. Code Structure (Functions, Classes, Modules) ---
+        if repo_path and os.path.isdir(repo_path):
+            try:
+                code_structure = CodeStructureExtractor.extract_directory(
+                    repo_path, max_files=200
+                )
+                if code_structure and code_structure.entities:
+                    # Ingest File nodes
+                    file_entities = {}
+                    for entity in code_structure.entities:
+                        fid = code_entity_id("file", entity.file_path, "")
+                        if entity.file_path not in file_entities:
+                            self.store.upsert_file(
+                                file_id=fid,
+                                path=entity.file_path,
+                                project_id=project_id,
+                            )
+                            file_entities[entity.file_path] = fid
+                            count += 1
+
+                    # Ingest Function nodes
+                    for entity in code_structure.entities:
+                        if entity.entity_type == "function":
+                            fid = file_entities.get(entity.file_path,
+                                code_entity_id("file", entity.file_path, ""))
+                            fn_id = code_entity_id("function", entity.file_path, entity.name)
+                            self.store.upsert_function(
+                                function_id=fn_id,
+                                name=entity.name,
+                                file_id=fid,
+                                signature=entity.signature,
+                                line_start=entity.line_start,
+                                line_end=entity.line_end,
+                            )
+                            count += 1
+
+                    # Ingest Class nodes
+                    for entity in code_structure.entities:
+                        if entity.entity_type == "class":
+                            fid = file_entities.get(entity.file_path,
+                                code_entity_id("file", entity.file_path, ""))
+                            cls_id = code_entity_id("class", entity.file_path, entity.name)
+                            self.store.upsert_class(
+                                class_id=cls_id,
+                                name=entity.name,
+                                file_id=fid,
+                                bases=entity.bases,
+                                line_start=entity.line_start,
+                                line_end=entity.line_end,
+                            )
+                            count += 1
+
+                    # Ingest relationships (CALLS, CONTAINS, INHERITS, etc.)
+                    for rel in code_structure.relationships:
+                        try:
+                            if rel.rel_type == "CALLS":
+                                self.store.link_function_call(rel.source_id, rel.target_id)
+                            elif rel.rel_type == "CONTAINS_METHOD":
+                                self.store.link_class_to_method(rel.source_id, rel.target_id)
+                        except Exception as e:
+                            logger.debug(f"Relationship ingestion failed ({rel.rel_type} {rel.source_id} -> {rel.target_id}): {e}")
+
+                    logger.info(f"Deep code structure: {code_structure.function_count} functions, "
+                                f"{code_structure.class_count} classes, "
+                                f"{code_structure.file_count} files ingested")
+            except Exception as e:
+                logger.warning(f"Code structure extraction failed for {project_id}: {e}")
+
+        # --- 2. Cross-File Dependencies ---
+        if repo_path and os.path.isdir(repo_path):
+            try:
+                dep_map = CrossFileLinker.build_dependency_map(repo_path, max_files=200)
+                if dep_map:
+                    # Pre-upsert File nodes for all files in the dependency graph
+                    # so IMPORTS relationships don't silently fail on missing targets
+                    all_files = set(dep_map.file_graph.keys())
+                    for imported_set in dep_map.file_graph.values():
+                        for imported in imported_set:
+                            if not imported.startswith("package:"):
+                                all_files.add(imported)
+
+                    for file_path in all_files:
+                        fid = cross_file_id(file_path, project_id)
+                        try:
+                            self.store.upsert_file(fid, file_path, project_id)
+                        except Exception as e:
+                            logger.debug(f"Failed to upsert file {file_path}: {e}")
+
+                    for source_file, imported_files in dep_map.file_graph.items():
+                        source_fid = cross_file_id(source_file, project_id)
+                        for imported in imported_files:
+                            if imported.startswith("package:"):
+                                continue  # Skip external packages (handled by skill extractor)
+                            imported_fid = cross_file_id(imported, project_id)
+                            try:
+                                self.store.link_file_import(source_fid, imported_fid)
+                                count += 1
+                            except Exception as e:
+                                logger.debug(f"File import link failed ({source_fid} -> {imported_fid}): {e}")
+                    logger.info(f"Cross-file links: {len(dep_map.imports)} imports mapped")
+            except Exception as e:
+                logger.debug(f"Cross-file linking failed for {project_id}: {e}")
+
+        # --- 3. Architecture Detection ---
+        if repo_path and os.path.isdir(repo_path):
+            try:
+                arch = ArchitectureDetector.analyze(repo_path)
+                if arch and arch.patterns:
+                    for pattern in arch.patterns:
+                        # Store architecture patterns as Skills for RAG queries
+                        self.store.upsert_skill(
+                            pattern.pattern_type.replace("_", " ").title(),
+                            "architecture",
+                            pattern.confidence,
+                            {"evidence": " | ".join(pattern.evidence[:3]),
+                             "details": str(pattern.details)}
+                        )
+                        self.store.link_skill_to_project(
+                            pattern.pattern_type.replace("_", " ").title(),
+                            "architecture", project_id,
+                            evidence=" | ".join(pattern.evidence[:3])
+                        )
+                        count += 1
+
+                    # Ingest Route nodes from REST detection
+                    for rdef in arch.route_definitions:
+                        rid = route_id(project_id, rdef["method"], rdef["path"])
+                        self.store.upsert_route(
+                            route_id=rid,
+                            method=rdef["method"],
+                            path=rdef["path"],
+                        )
+                        self.store.link_project_to_route(project_id, rid)
+                        count += 1
+
+                    logger.info(f"Architecture: {len(arch.patterns)} patterns, "
+                                f"{len(arch.route_definitions)} routes detected")
+            except Exception as e:
+                logger.debug(f"Architecture detection failed for {project_id}: {e}")
+
+        # --- 4. Doc-Code Linking (README -> source files) ---
+        if readme_content and repo_path and os.path.isdir(repo_path):
+            try:
+                doc_map = DocCodeLinker.analyze(readme_content, repo_path, project_id)
+                if doc_map and doc_map.sections:
+                    for i, section in enumerate(doc_map.sections):
+                        nid = narrative_id_from_section(project_id, section.heading, i)
+                        self.store.upsert_narrative(
+                            narrative_id=nid,
+                            text=f"## {section.heading}\n\n{section.content[:800]}",
+                            source_project_id=project_id,
+                        )
+                        count += 1
+
+                    for link in doc_map.links:
+                        try:
+                            idx = next((j for j, s in enumerate(doc_map.sections)
+                                        if s.heading == link.section_heading), 0)
+                            nid = narrative_id_from_section(project_id, link.section_heading, idx)
+                            fid = cross_file_id(link.file_path, project_id)
+                            self.store.link_file_to_documentation(fid, nid)
+                            count += 1
+                        except Exception as e:
+                            logger.debug(f"Doc-code link failed ({link.section_heading} -> {link.file_path}): {e}")
+
+                    logger.info(f"Doc-code links: {len(doc_map.sections)} README sections, "
+                                f"{len(doc_map.links)} file links")
+            except Exception as e:
+                logger.debug(f"Doc-code linking failed for {project_id}: {e}")
+
+        return count
+
+    def _upsert_deployment_analysis(self, cleaned: CleanedProject,
+                                     deployment: Optional[DeploymentAnalysis]) -> int:
+        """Ingest deep deployment analysis (routes, configs, domains) into Neo4j."""
+        count = 0
+        project_id = cleaned.project_id
+
+        if not deployment:
+            return 0
+
+        try:
+            # Routes
+            for route in deployment.routes:
+                rid = route_id(project_id, route.method, route.path or route.source)
+                self.store.upsert_route(
+                    route_id=rid,
+                    method=route.method,
+                    path=route.path or route.source,
+                )
+                self.store.link_project_to_route(project_id, rid)
+                count += 1
+
+            # Configs
+            for cfg in deployment.configs:
+                cid = config_id(project_id, cfg.key)
+                self.store.upsert_config(
+                    config_id=cid,
+                    key=cfg.key,
+                    value=cfg.value[:100] if not cfg.is_secret else "***",
+                    config_type=cfg.config_type,
+                )
+                self.store.link_project_to_config(project_id, cid)
+                count += 1
+
+            # Domains
+            for domain in deployment.domains:
+                if domain.name:
+                    self.store.upsert_domain(domain.name)
+                    self.store.link_project_to_domain(project_id, domain.name)
+                    count += 1
+
+            logger.info(f"Deployment analysis: {len(deployment.routes)} routes, "
+                        f"{len(deployment.configs)} configs, "
+                        f"{len(deployment.domains)} domains")
+        except Exception as e:
+            logger.debug(f"Deployment ingestion failed for {project_id}: {e}")
+
+        return count
 
     def _upsert_cleaned_project(self, project: CleanedProject, github_user: str = "") -> None:
         """Upsert a CleanedProject into Neo4j with all its skills and links."""
@@ -197,6 +429,13 @@ class EnhancedPipeline:
                     # Upsert into Neo4j via the cleaned project
                     self._upsert_cleaned_project(cleaned, github_user)
 
+                    # Deep analysis: code structure, cross-file links, architecture, doc-code
+                    repo_path_str = analysis.get('repo_path', '')
+                    readme = repo_data.get('readme', '')
+                    deep_count = self._ingest_deep_analysis(
+                        cleaned, repo_path_str, readme
+                    )
+
                     # Cleanup cloned repo IMMEDIATELY after successful ingest
                     if repo_path:
                         self._cleanup_repo(Path(repo_path))
@@ -206,7 +445,8 @@ class EnhancedPipeline:
                         'name': repo_name,
                         'status': 'success',
                         'skills_count': len(cleaned.skills),
-                        'languages': list(repo_data.get('languages', {}).keys())
+                        'languages': list(repo_data.get('languages', {}).keys()),
+                        'deep_nodes': deep_count,
                     })
                     
                     # Force garbage collection after each repo
@@ -256,6 +496,15 @@ class EnhancedPipeline:
                 # Clean and normalize data before Neo4j ingestion
                 cleaned = self.cleaner.clean_vercel_project(project)
                 self._upsert_cleaned_project(cleaned)
+
+                # Deep deployment analysis
+                dep_analysis = DeploymentAnalyzer.analyze_vercel_project(project)
+                if dep_analysis:
+                    self._upsert_deployment_analysis(cleaned, dep_analysis)
+                    # Also look for vercel.json in any linked GitHub repo
+                    if dep_analysis.linked_github_repo:
+                        cleaned.linked_project_ids.append(dep_analysis.linked_github_repo)
+
                 ingested += 1
 
             except Exception as e:
@@ -282,29 +531,38 @@ class EnhancedPipeline:
 
         ingested = 0
 
-        # Workers - clean and normalize each one
+        # Workers - clean, normalize, and deep-analyze each one
         for worker in cf_result.get('collected_workers', []):
             try:
                 cleaned = self.cleaner.clean_cloudflare_worker(worker)
                 self._upsert_cleaned_project(cleaned)
+                dep = DeploymentAnalyzer.analyze_cloudflare_worker(worker)
+                if dep:
+                    self._upsert_deployment_analysis(cleaned, dep)
                 ingested += 1
             except Exception as e:
                 logger.error(f'Failed to ingest Cloudflare worker {worker.get("name", "?")}: {e}')
 
-        # Pages - clean and normalize each one
+        # Pages - clean, normalize, and deep-analyze each one
         for page in cf_result.get('collected_pages', []):
             try:
                 cleaned = self.cleaner.clean_cloudflare_page(page)
                 self._upsert_cleaned_project(cleaned)
+                dep = DeploymentAnalyzer.analyze_cloudflare_page(page)
+                if dep:
+                    self._upsert_deployment_analysis(cleaned, dep)
                 ingested += 1
             except Exception as e:
                 logger.error(f'Failed to ingest Cloudflare page {page.get("name", "?")}: {e}')
 
-        # Zones - clean and normalize each one
+        # Zones - clean, normalize, and deep-analyze each one
         for zone in cf_result.get('collected_zones', []):
             try:
                 cleaned = self.cleaner.clean_cloudflare_zone(zone)
                 self._upsert_cleaned_project(cleaned)
+                dep = DeploymentAnalyzer.analyze_cloudflare_zone(zone)
+                if dep:
+                    self._upsert_deployment_analysis(cleaned, dep)
                 ingested += 1
             except Exception as e:
                 logger.error(f'Failed to ingest Cloudflare zone {zone.get("name", "?")}: {e}')

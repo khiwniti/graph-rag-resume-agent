@@ -111,7 +111,7 @@ collect-legacy: ## Run legacy collection pipeline
 graph-sample: ## Create sample knowledge graph for testing
 	PYTHONPATH=. $(PYTHON) scripts/build_knowledge_graph.py create_sample
 
-graph-stats: ## Show knowledge graph statistics
+graph-stats: ## Show knowledge graph statistics (with deep analysis nodes)
 	PYTHONPATH=. $(PYTHON) -c "\
 import os; \
 os.environ.pop('NEO4J_URI', None); \
@@ -122,7 +122,18 @@ from app.graph_store.neo4j_store import Neo4jStore, KnowledgeGraphConfig; \
 from app.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DATABASE; \
 s = Neo4jStore(KnowledgeGraphConfig(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD, database=NEO4J_DATABASE)); \
 s.connect(); \
-import json; print(json.dumps(s.get_stats(), indent=2)); \
+import json; \
+stats = s.get_stats(); \
+print(json.dumps(stats, indent=2)); \
+print(); \
+print('=== DEEP ANALYSIS SUMMARY ==='); \
+print(f'  Functions: {stats.get(\"functions\", 0)}'); \
+print(f'  Classes:   {stats.get(\"classes\", 0)}'); \
+print(f'  Files:     {stats.get(\"files\", 0)}'); \
+print(f'  Routes:    {stats.get(\"routes\", 0)}'); \
+print(f'  Configs:   {stats.get(\"configs\", 0)}'); \
+print(f'  Domains:   {stats.get(\"domains\", 0)}'); \
+print(f'  Modules:   {stats.get(\"modules\", 0)}'); \
 s.close()"
 
 graph-reset: ## Wipe Neo4j graph completely
@@ -267,3 +278,99 @@ deploy-vercel: ## Deploy to Vercel
 
 demo: ## Run the knowledge graph demo
 	PYTHONPATH=. $(PYTHON) scripts/demo_knowledge_graph.py
+
+# ============================================================================
+# Deep Analysis
+# ============================================================================
+.PHONY: deep-analyze deep-structure deep-architecture deep-routes deep-docs
+
+deep-analyze: collect-clean ## Full deep analysis pipeline (fresh graph + deep extraction)
+
+deep-structure: ## Show code structure stats from Neo4j
+	PYTHONPATH=. $(PYTHON) -c "\
+import os; \
+os.environ.pop('NEO4J_URI', None); \
+os.environ.pop('NEO4J_USER', None); \
+os.environ.pop('NEO4J_PASSWORD', None); \
+os.environ.pop('NEO4J_DATABASE', None); \
+from app.graph_store.neo4j_store import Neo4jStore, KnowledgeGraphConfig; \
+from app.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DATABASE; \
+s = Neo4jStore(KnowledgeGraphConfig(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD, database=NEO4J_DATABASE)); \
+s.connect(); \
+with s.driver.session() as session: \
+    print('=== TOP FUNCTIONS ==='); \
+    for r in session.run('MATCH (fn:Function) RETURN fn.name, fn.signature, fn.line_count ORDER BY fn.name LIMIT 15'): \
+        print(f'  {r[0]}: {r[1][:60] if r[1] else \"\"}'); \
+    print(); \
+    print('=== CLASS HIERARCHY ==='); \
+    for r in session.run('MATCH (c:Class)-[:INHERITS]->(p:Class) RETURN c.name, p.name LIMIT 20'): \
+        print(f'  {r[0]} -> {r[1]}'); \
+    print(); \
+    print('=== CALL GRAPH (sample) ==='); \
+    for r in session.run('MATCH (a:Function)-[:CALLS]->(b:Function) RETURN a.name, b.name LIMIT 20'): \
+        print(f'  {r[0]} -> {r[1]}'); \
+s.close()"
+
+deep-architecture: ## Show detected architecture patterns
+	PYTHONPATH=. $(PYTHON) -c "\
+import os; \
+os.environ.pop('NEO4J_URI', None); \
+os.environ.pop('NEO4J_USER', None); \
+os.environ.pop('NEO4J_PASSWORD', None); \
+os.environ.pop('NEO4J_DATABASE', None); \
+from app.graph_store.neo4j_store import Neo4jStore, KnowledgeGraphConfig; \
+from app.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DATABASE; \
+s = Neo4jStore(KnowledgeGraphConfig(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD, database=NEO4J_DATABASE)); \
+s.connect(); \
+with s.driver.session() as session: \
+    print('=== ARCHITECTURE PATTERNS ==='); \
+    for r in session.run('MATCH (sk:Skill {category: \"architecture\"}) RETURN sk.name, sk.confidence, sk.evidence'): \
+        print(f'  {r[0]} (confidence: {r[1]})'); \
+        if r[2]: print(f'    evidence: {r[2][:120]}'); \
+    print(); \
+    print('=== CROSS-FILE DEPENDENCIES ==='); \
+    for r in session.run('MATCH (f:File)-[i:IMPORTS]->(f2:File) RETURN f.path, f2.path LIMIT 15'): \
+        print(f'  {r[0][:40]}  ->  {r[1][:40]}'); \
+s.close()"
+
+deep-routes: ## Show detected API routes
+	PYTHONPATH=. $(PYTHON) -c "\
+import os; \
+os.environ.pop('NEO4J_URI', None); \
+os.environ.pop('NEO4J_USER', None); \
+os.environ.pop('NEO4J_PASSWORD', None); \
+os.environ.pop('NEO4J_DATABASE', None); \
+from app.graph_store.neo4j_store import Neo4jStore, KnowledgeGraphConfig; \
+from app.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DATABASE; \
+s = Neo4jStore(KnowledgeGraphConfig(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD, database=NEO4J_DATABASE)); \
+s.connect(); \
+with s.driver.session() as session: \
+    print('=== API ROUTES ==='); \
+    for r in session.run('MATCH (rt:Route) RETURN rt.method, rt.path ORDER BY rt.path LIMIT 30'): \
+        print(f'  {r[0]:6s} {r[1]}'); \
+    print(); \
+    print('=== DOMAINS ==='); \
+    for r in session.run('MATCH (d:Domain) RETURN d.name ORDER BY d.name'): \
+        print(f'  {r[0]}'); \
+    print(); \
+    print('=== ENVIRONMENT CONFIG ==='); \
+    for r in session.run('MATCH (cf:Config {config_type: \"env_var\"}) RETURN cf.key, cf.value ORDER BY cf.key LIMIT 20'): \
+        print(f'  {r[0]} = {r[1][:60]}'); \
+s.close()"
+
+deep-docs: ## Show README-to-code documentation links
+	PYTHONPATH=. $(PYTHON) -c "\
+import os; \
+os.environ.pop('NEO4J_URI', None); \
+os.environ.pop('NEO4J_USER', None); \
+os.environ.pop('NEO4J_PASSWORD', None); \
+os.environ.pop('NEO4J_DATABASE', None); \
+from app.graph_store.neo4j_store import Neo4jStore, KnowledgeGraphConfig; \
+from app.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DATABASE; \
+s = Neo4jStore(KnowledgeGraphConfig(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD, database=NEO4J_DATABASE)); \
+s.connect(); \
+with s.driver.session() as session: \
+    print('=== README SECTIONS -> SOURCE FILES ==='); \
+    for r in session.run('MATCH (f:File)-[:DOCUMENTED_BY]->(n:Narrative) RETURN n.id, f.path LIMIT 20'): \
+        print(f'  Doc \"{r[0][:40]}\"  ->  {r[1][:50]}'); \
+s.close()"

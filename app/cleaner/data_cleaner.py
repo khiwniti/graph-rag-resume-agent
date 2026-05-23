@@ -143,6 +143,13 @@ class CleanedProject:
     properties: Dict[str, Any] = field(default_factory=dict)
     skills: List[CleanedSkill] = field(default_factory=list)
     linked_project_ids: List[str] = field(default_factory=list)
+    # Deep analysis data
+    code_structure: Optional[Any] = None  # CodeStructure from code_structure.py
+    cross_file_map: Optional[Any] = None  # CrossFileMap from cross_file_linker.py
+    architecture: Optional[Any] = None  # ArchitectureAnalysis from architecture_detector.py
+    deployment: Optional[Any] = None  # DeploymentAnalysis from deployment_analyzer.py
+    doc_code_map: Optional[Any] = None  # DocCodeMap from doc_code_linker.py
+    readme_content: str = ""  # Raw README text for narrative/doc linking
 
 
 class DataCleaner:

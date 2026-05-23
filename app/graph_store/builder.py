@@ -9,6 +9,11 @@ from .neo4j_store import Neo4jStore, KnowledgeGraphConfig
 from ..extractors.skill_extractor import SkillExtractor, ExtractedSkill
 from ..extractors.dependency_parser import DependencyParser
 from ..extractors.source_analyzer import SourceAnalyzer
+from ..extractors.code_structure import CodeStructureExtractor, entity_id as code_entity_id
+from ..extractors.cross_file_linker import CrossFileLinker, file_id as cross_file_id
+from ..extractors.architecture_detector import ArchitectureDetector
+from ..extractors.deployment_analyzer import DeploymentAnalyzer, config_id, route_id
+from ..extractors.doc_code_linker import DocCodeLinker, narrative_id_from_section
 
 logger = logging.getLogger(__name__)
 
