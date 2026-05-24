@@ -1,0 +1,76 @@
+[project]
+name = "rhythm-patterns"
+version = "1.0.0"
+description = "A collection of creative, reusable rhythm patterns for developers"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "CC0-1.0"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = [
+    "rhythm",
+    "music",
+    "patterns",
+    "drums",
+    "midi",
+    "audio",
+    "production"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Musicians",
+    "License :: CC0 1.0 Universal (CC0 1.0) Public Domain Dedication",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Artistic Expressions",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Sound/Audio :: MIDI",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "isort>=5.0",
+    "mypy>=1.0",
+]
+midi = [
+    "mido>=1.2.0",
+]
+audio = [
+    "numpy>=1.20",
+    "sounddevice>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/rhythm-patterns"
+Documentation = "https://github.com/your-username/rhythm-patterns#readme"
+Repository = "https://github.com/your-username/rhythm-patterns"
+Issues = "https://github.com/your-username/rhythm-patterns/issues"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rhythm*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
