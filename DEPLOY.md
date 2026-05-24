@@ -130,6 +130,36 @@ python scripts/run_server.py
 
 ---
 
+## Neo4j Aura Free profile
+
+`export_to_neo4j(graph, profile="aura_free")` ships a pruned subgraph that
+fits inside Aura Free's 200,000-node / 400,000-relationship cap. The full
+graph stays on disk in `data/graph/knowledge_graph.json`.
+
+**What the profile drops or caps:**
+
+- All `CALLS` edges (the largest edge type — ~78% of the full graph).
+- `IMPLEMENTS` and `DOCUMENTS` edges, capped at `implements_top_n` / `documents_top_n`
+  per source node (default 10, by descending weight).
+- `:function` nodes orphaned by the `CALLS` removal.
+- `Evidence` rows not referenced by any retained node or edge.
+
+The profile can also be set via `NEO4J_PROFILE=aura_free` (kwarg wins).
+
+A projection log is emitted before any write; if projected counts still
+exceed Aura Free's caps the exporter logs a warning but does not abort.
+Lower the `*_top_n` kwargs to trim further (the product page advertises a
+stricter 50,000-node / 175,000-relationship cap in some regions).
+
+**Aura Free pause behavior:**
+
+Aura Free pauses an instance after 72 hours of inactivity; the first query
+after resume can take a few minutes while the backup is restored. Build
+retry/backoff into clients and consider a daily lightweight `RETURN 1`
+query to keep the instance warm.
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -141,6 +171,7 @@ python scripts/run_server.py
 | `NEO4J_URI` | Yes | Neo4j connection URI |
 | `NEO4J_USER` | Yes | Neo4j username |
 | `NEO4J_PASSWORD` | Yes | Neo4j password |
+| `NEO4J_PROFILE` | No | Export profile: "full" (default) or "aura_free" |
 | `EMBEDDING_MODEL` | No | Default: `all-MiniLM-L6-v2` |
 
 ---
