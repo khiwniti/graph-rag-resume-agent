@@ -16,3 +16,8 @@ build/
 data/
 .hermes/
 .vercel
+
+# Local tooling artifacts
+.understand-anything/
+.claude/settings.local.json
+

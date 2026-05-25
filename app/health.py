@@ -174,7 +174,9 @@ async def check_vector_store() -> ComponentHealth:
     
     try:
         import faiss
-        index_path = EMBEDDINGS_DIR / 'faiss_index'
+        # Convention: index prefix is EMBEDDINGS_DIR/faiss_index, binary index is <prefix>.faiss
+        index_prefix = EMBEDDINGS_DIR / 'faiss_index'
+        index_path = index_prefix.with_suffix('.faiss')
         
         if index_path.exists():
             index = faiss.read_index(str(index_path))
@@ -188,7 +190,7 @@ async def check_vector_store() -> ComponentHealth:
             return ComponentHealth(
                 name='vector_store',
                 status=HealthStatus.DEGRADED,
-                message='Index file not found (no data collected yet)',
+                message='Index file not found (no embeddings indexed yet)',
             )
     except ImportError:
         return ComponentHealth(

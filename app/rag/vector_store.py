@@ -37,8 +37,20 @@ class VectorStore:
             self._load_or_create_index()
         return self._index
 
+    def _index_file_path(self) -> Optional[Path]:
+        """Return the on-disk FAISS index file path.
+
+        Convention in this repo:
+        - index_path is a *prefix* path (e.g., data/embeddings/faiss_index)
+        - FAISS binary lives at <prefix>.faiss
+        - metadata lives at <prefix>.json
+        """
+        if not self.index_path:
+            return None
+        return Path(self.index_path).with_suffix(".faiss")
+
     def _load_or_create_index(self):
-        """Load existing index or create new one."""
+        """Load existing index or create a new one."""
         try:
             import faiss
         except ImportError:
@@ -46,19 +58,19 @@ class VectorStore:
             self._index = "mock"
             return
 
-        if self.index_path and Path(self.index_path).exists():
-            # Load existing index
-            self._index = faiss.read_index(self.index_path)
+        index_file = self._index_file_path()
+        if index_file and index_file.exists():
+            self._index = faiss.read_index(str(index_file))
             self._load_metadata()
-            logger.info(f"Loaded FAISS index from {self.index_path}")
+            logger.info(f"Loaded FAISS index from {index_file}")
         else:
-            # Create new index
             self._index = faiss.IndexFlatL2(self.dimension)
             logger.info(f"Created new FAISS index with dimension {self.dimension}")
 
     def _load_metadata(self) -> None:
         """Load metadata from disk."""
         if self.index_path:
+            # metadata remains alongside the prefix (e.g., faiss_index.json)
             meta_path = Path(self.index_path).with_suffix('.json')
             if meta_path.exists():
                 with open(meta_path) as f:
@@ -123,6 +135,9 @@ class VectorStore:
                 results.append((meta, random.uniform(0.5, 2.0)))
             return results
 
+        if self.index is None:
+            return []
+
         import numpy as np
 
         if self.index.ntotal == 0:
@@ -145,9 +160,12 @@ class VectorStore:
         """Save index to disk."""
         if self.index_path and self._index != "mock":
             import faiss
-            faiss.write_index(self._index, self.index_path)
+            index_file = self._index_file_path()
+            if index_file is None:
+                return
+            faiss.write_index(self._index, str(index_file))
             self._save_metadata()
-            logger.info(f"Saved FAISS index to {self.index_path}")
+            logger.info(f"Saved FAISS index to {index_file}")
 
     def clear(self) -> None:
         """Clear the vector store."""

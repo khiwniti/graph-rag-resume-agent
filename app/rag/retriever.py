@@ -119,13 +119,90 @@ class HybridRetriever:
         results = []
         query_lower = query.lower()
 
-        # Check if query matches specific skill categories
-        categories = self._extract_categories_from_query(query)
+        # Step 1: Person skills, but only return the generic "top skills" list when the query is broad.
+        # For specific queries, filter by query tokens so we don't always return TypeScript/React/etc.
+        skills = self.neo4j_store.get_person_skills(person_id)
 
-        if categories:
-            # Search by category
-            for category in categories:
-                skills = self.neo4j_store.search_skills(category, limit=top_k)
+        # crude tokenization + stopwords
+        words = [w.strip().lower() for w in query_lower.replace("?", " ").replace(",", " ").split()]
+        stop = {
+            "how","have","you","the","and","for","with","your","from","this","that","what","where","when",
+            "is","are","was","were","do","does","did","in","on","to","of","a","an","my","me","used","use"
+        }
+        tokens = [w for w in words if len(w) > 2 and w not in stop]
+
+        def matches_skill(name: str) -> bool:
+            n = (name or "").lower()
+            return any(t in n for t in tokens)
+
+        if tokens:
+            filtered_skills = [s for s in skills if matches_skill(s.get("name", ""))]
+        else:
+            filtered_skills = skills
+
+        # If the query is specific but we found no matches, DO NOT return generic top skills.
+        if tokens and not filtered_skills:
+            filtered_skills = []
+
+        for skill in filtered_skills[:top_k]:
+            results.append(RetrievalResult(
+                skill_name=skill["name"],
+                category=skill["category"],
+                confidence=skill.get("confidence", 1.0),
+                source="graph",
+                evidence=skill.get("evidence"),
+            ))
+
+        # Step 2: Schema-aware skill search with project counts (Person/Project/Skill only)
+        cypher = """
+        MATCH (me:Person {id: $person_id})-[:HAS_SKILL]->(s:Skill)
+        OPTIONAL MATCH (p:Project)-[:REQUIRES_SKILL]->(s)
+        WITH s, count(p) as project_count
+        WITH s, project_count
+        WHERE $query = '' OR toLower(s.name) CONTAINS toLower($query)
+        RETURN s.name as name,
+               s.category as category,
+               coalesce(s.confidence, 0.0) as confidence,
+               project_count as project_count
+        ORDER BY project_count DESC, confidence DESC
+        LIMIT $limit
+        """
+        try:
+            # Only run if (a) query looks specific or (b) we have no results yet
+            if tokens or not results:
+                with self.neo4j_store.driver.session() as session:
+                    rows = session.run(cypher, {
+                        "person_id": person_id,
+                        "query": (query.strip() if len(query.strip()) > 2 else ""),
+                        "limit": top_k,
+                    })
+                    for record in rows:
+                        results.append(RetrievalResult(
+                            skill_name=record["name"],
+                            category=record["category"] or "skill",
+                            confidence=float(record.get("confidence") or 0.0),
+                            source="graph",
+                            evidence=f"Used in {record['project_count']} projects" if record.get("project_count") is not None else None,
+                        ))
+        except Exception as e:
+            logger.debug(f"Graph skill search failed: {e}")
+
+        # Step 3: Generic skill search if no person-specific results
+        if not results:
+            categories = self._extract_categories_from_query(query)
+            if categories:
+                for category in categories:
+                    skills = self.neo4j_store.search_skills(category, limit=top_k)
+                    for skill in skills:
+                        results.append(RetrievalResult(
+                            skill_name=skill["name"],
+                            category=skill["category"],
+                            confidence=skill.get("confidence", 1.0),
+                            source="graph",
+                        ))
+            else:
+                # Substring search on all skills
+                skills = self.neo4j_store.search_skills(query, limit=top_k)
                 for skill in skills:
                     results.append(RetrievalResult(
                         skill_name=skill["name"],
@@ -133,19 +210,19 @@ class HybridRetriever:
                         confidence=skill.get("confidence", 1.0),
                         source="graph",
                     ))
-        else:
-            # Get all skills for person
-            skills = self.neo4j_store.get_person_skills(person_id)
-            for skill in skills[:top_k]:
-                results.append(RetrievalResult(
-                    skill_name=skill["name"],
-                    category=skill["category"],
-                    confidence=skill.get("confidence", 1.0),
-                    source="graph",
-                    evidence=skill.get("evidence"),
-                ))
 
-        return results
+        return self._deduplicate_results(results, top_k)
+
+    def _deduplicate_results(self, results: List[RetrievalResult], top_k: int) -> List[RetrievalResult]:
+        """Deduplicate results by skill name."""
+        seen = set()
+        deduped = []
+        for r in results:
+            key = r.skill_name.lower()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(r)
+        return sorted(deduped, key=lambda x: x.confidence, reverse=True)[:top_k]
 
     def _retrieve_from_vectors(self, query: str,
                                 top_k: int) -> List[RetrievalResult]:
@@ -166,14 +243,31 @@ class HybridRetriever:
         for metadata, distance in matches:
             # Convert L2 distance to a rough confidence score (closer = higher confidence)
             confidence = max(0.0, 1.0 - (distance / 10.0))
-            results.append(RetrievalResult(
-                skill_name=metadata.get("skill_name", metadata.get("text", "")[:50]),
-                category=metadata.get("category", "skill"),
-                confidence=confidence,
-                source="vector",
-                score=confidence,
-                evidence=metadata.get("source", ""),
-            ))
+
+            # This repo's vector index may store wiki pages, not explicit skills.
+            # In that case, treat the vector hit as an evidence-backed "concept/document" result.
+            title = metadata.get("title") or metadata.get("skill_name") or metadata.get("text", "")[:50]
+            wiki_path = metadata.get("wiki_path")
+            wiki_type = metadata.get("wiki_type")
+
+            if wiki_path:
+                results.append(RetrievalResult(
+                    skill_name=str(title),
+                    category=f"wiki:{wiki_type or 'document'}",
+                    confidence=confidence,
+                    source="vector",
+                    score=confidence,
+                    evidence=f"wiki:{wiki_path}",
+                ))
+            else:
+                results.append(RetrievalResult(
+                    skill_name=str(title),
+                    category=metadata.get("category", "skill"),
+                    confidence=confidence,
+                    source="vector",
+                    score=confidence,
+                    evidence=metadata.get("source", ""),
+                ))
 
         return results
 

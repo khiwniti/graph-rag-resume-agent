@@ -15,6 +15,9 @@ from app.graph_store import Neo4jStore, KnowledgeGraphConfig
 from app.rag.retriever import HybridRetriever
 from app.rag.embedder import Embedder
 from app.rag.vector_store import VectorStore
+from app.schema.graph import UniversalGraph
+from app.schema.nodes import NodeType
+from app.schema.edges import EdgeType
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +97,28 @@ class ResumeAgent:
                 confidence=0.0
             )
 
+        # Try to find a valid person_id if "me" doesn't return anything
+        person_id = "me"
+        
+        # Check if "me" exists, otherwise use the first person found
+        try:
+            with self._store.driver.session() as session:
+                result = session.run("MATCH (p:Person {id: 'me'}) RETURN p LIMIT 1").single()
+                if not result:
+                    result = session.run("MATCH (p:Person) RETURN p.id LIMIT 1").single()
+                    if result:
+                        person_id = result["p.id"]
+                        logger.info(f"Using person_id: {person_id}")
+        except Exception as e:
+            logger.warning(f"Failed to find person: {e}")
+
         # Try career story retrieval for period/topic queries
         q_lower = question.lower()
         if any(word in q_lower for word in ["career", "story", "timeline", "period", "202", "2023", "2024", "2025"]):
             return self._answer_career_story(question, top_k)
 
         # Standard skill search
-        results = self._retriever.retrieve(question, person_id="me", top_k=top_k)
+        results = self._retriever.retrieve(question, person_id=person_id, top_k=top_k)
 
         if not results:
             return AgentResponse(
@@ -171,21 +189,53 @@ class ResumeAgent:
 
     def list_skills(self, min_confidence: float = 0.0) -> List[Dict[str, Any]]:
         """List all skills with confidence >= min_confidence."""
-        if not self._ensure_connection():
+        # Preferred path: Neo4j-backed skills (fallback to JSON if Neo4j is empty)
+        if self._ensure_connection():
+            skills = self._store.get_person_skills("me")
+            filtered = [s for s in skills if s.get("confidence", 0) >= min_confidence]
+            filtered.sort(key=lambda s: s.get("confidence", 0), reverse=True)
+            if filtered:
+                return [
+                    {
+                        "skill": s["name"],
+                        "category": s["category"],
+                        "confidence": s.get("confidence", 0),
+                        "evidence": s.get("evidence", ""),
+                    }
+                    for s in filtered
+                ]
+            logger.info("Neo4j returned 0 skills; falling back to JSON graph")
+
+        # Fallback path: universal graph JSON (data/graph/knowledge_graph.json)
+        try:
+            g = UniversalGraph.load_json(self.graph_path)
+        except Exception as e:
+            logger.warning(f"list_skills fallback failed to load graph JSON: {e}")
             return []
 
-        skills = self._store.get_person_skills("me")
-        filtered = [s for s in skills if s.get("confidence", 0) >= min_confidence]
-        filtered.sort(key=lambda s: s.get("confidence", 0), reverse=True)
-        return [
-            {
-                "skill": s["name"],
-                "category": s["category"],
-                "confidence": s.get("confidence", 0),
-                "evidence": s.get("evidence", ""),
-            }
-            for s in filtered
-        ]
+        # Count usage: repo -> technology edges
+        uses_counts: Dict[str, int] = {}
+        for e in g.edges.values():
+            if e.type == EdgeType.USES:
+                uses_counts[e.target] = uses_counts.get(e.target, 0) + 1
+
+        out: List[Dict[str, Any]] = []
+        for n in g.nodes.values():
+            if n.type != NodeType.TECHNOLOGY:
+                continue
+            conf = float(n.confidence or 0.0)
+            if conf < min_confidence:
+                continue
+            count = uses_counts.get(n.id, 0)
+            out.append({
+                "skill": n.label,
+                "category": n.id,
+                "confidence": conf,
+                "evidence": f"Used in {count} projects" if count else "",
+            })
+
+        out.sort(key=lambda s: (s.get("confidence", 0), uses_counts.get(s.get("category", ""), 0)), reverse=True)
+        return out
 
     def get_skill_evidence(self, skill_name: str) -> List[Dict[str, Any]]:
         """Get evidence for a specific skill."""
@@ -196,19 +246,45 @@ class ResumeAgent:
 
     def get_projects(self) -> List[Dict[str, Any]]:
         """List all projects from the knowledge graph."""
-        if not self._ensure_connection():
+        # Preferred path: Neo4j-backed projects (fallback to JSON if Neo4j is empty)
+        if self._ensure_connection():
+            query = """
+            MATCH (p:Project)
+            RETURN p.id as id, p.name as name, p.description as description,
+                   p.source as source, p.url as url, p.pushed_at as pushed_at
+            ORDER BY p.pushed_at DESC
+            """
+            try:
+                with self._store.driver.session() as session:
+                    result = session.run(query)
+                    rows = [record.data() for record in result]
+                    if rows:
+                        return rows
+                    logger.info("Neo4j returned 0 projects; falling back to JSON graph")
+            except Exception as e:
+                logger.warning(f"Failed to get projects from Neo4j: {e}")
+                # fall through to JSON
+
+        # Fallback path: universal graph JSON
+        try:
+            g = UniversalGraph.load_json(self.graph_path)
+        except Exception as e:
+            logger.warning(f"get_projects fallback failed to load graph JSON: {e}")
             return []
 
-        query = """
-        MATCH (p:Project)
-        RETURN p.id as id, p.name as name, p.description as description,
-               p.source as source, p.url as url, p.pushed_at as pushed_at
-        ORDER BY p.pushed_at DESC
-        """
-        try:
-            with self._store.driver.session() as session:
-                result = session.run(query)
-                return [record.data() for record in result]
-        except Exception as e:
-            logger.warning(f"Failed to get projects: {e}")
-            return []
+        projects: List[Dict[str, Any]] = []
+        for n in g.nodes.values():
+            if n.type not in (NodeType.REPO, NodeType.DEPLOYMENT):
+                continue
+            props = n.properties or {}
+            projects.append({
+                "id": n.id,
+                "name": n.label,
+                "description": props.get("description") or props.get("summary") or "",
+                "source": n.provider or ("github" if n.type == NodeType.REPO else "deployment"),
+                "url": props.get("url") or props.get("html_url") or props.get("production_url") or "",
+                "pushed_at": props.get("pushed_at") or props.get("updated_at") or props.get("updated") or "",
+            })
+
+        projects.sort(key=lambda p: p.get("pushed_at") or "", reverse=True)
+        return projects

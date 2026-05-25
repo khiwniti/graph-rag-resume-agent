@@ -223,34 +223,40 @@ class RequestLogger:
         self.request_id = request_id or get_request_id()
     
     def log_request_start(self, method: str, path: str, **kwargs):
-        self.logger.info(
-            f'Request started: {method} {path}',
-            method=method,
-            path=path,
-            request_id=self.request_id,
-            **kwargs
-        )
-    
+        # Standard library logging only supports structured fields via `extra=`.
+        extra = {"method": method, "path": path, "request_id": self.request_id}
+        if kwargs:
+            extra.update(kwargs)
+        self.logger.info(f"Request started: {method} {path}", extra=extra)
+
     def log_request_end(self, method: str, path: str, status_code: int, duration_ms: float, **kwargs):
         level = logging.INFO if status_code < 400 else logging.WARNING
         if status_code >= 500:
             level = logging.ERROR
-        
+
+        extra = {
+            "method": method,
+            "path": path,
+            "status_code": status_code,
+            "duration_ms": duration_ms,
+            "request_id": self.request_id,
+        }
+        if kwargs:
+            extra.update(kwargs)
+
         self.logger.log(
             level,
-            f'Request completed: {method} {path} - {status_code} ({duration_ms:.1f}ms)',
-            method=method,
-            path=path,
-            status_code=status_code,
-            duration_ms=duration_ms,
-            request_id=self.request_id,
-            **kwargs
+            f"Request completed: {method} {path} - {status_code} ({duration_ms:.1f}ms)",
+            extra=extra,
         )
-    
+
     def log_error(self, error: Exception, context: str = ''):
+        extra = {
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "request_id": self.request_id,
+        }
         self.logger.exception(
-            f'Error in request: {context}' if context else 'Error in request',
-            error_type=type(error).__name__,
-            error_message=str(error),
-            request_id=self.request_id,
+            f"Error in request: {context}" if context else "Error in request",
+            extra=extra,
         )
